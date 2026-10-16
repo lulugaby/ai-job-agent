@@ -1,0 +1,19 @@
+
+# API keys
+.env
+.env.*
+
+# Python environment
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Private resume
+private/
+
+# Database and exports
+data/
+
+# Mac files
+.DS_Store
