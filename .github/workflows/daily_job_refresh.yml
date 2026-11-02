@@ -20,30 +20,82 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # Step 1: Download repository
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          ref: main
+          persist-credentials: true
 
+      # Step 2: Set up Python
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
+      # Step 3: Install dependencies
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt
-
-      - name: Refresh job listings
-        run: python refresh_jobs.py
-
-      - name: Commit updated database
         run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      # Step 4: Refresh Greenhouse jobs
+      - name: Refresh Greenhouse jobs
+        run: |
+          python refresh_jobs.py
+
+      # Step 5: Save database to GitHub
+      - name: Commit and push updated database
+        shell: bash
+        run: |
+          set -e
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add data/jobs.db
+          # Retry if the remote branch changes
+          for attempt in 1 2 3; do
 
-          if ! git diff --cached --quiet; then
+            echo "Push attempt $attempt of 3"
+
+            # Get latest changes from GitHub
+            git fetch origin main:refs/remotes/origin/main
+
+            # Check whether main changed during refresh
+            if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]; then
+
+              echo "Remote main has newer commits."
+              echo "Refreshing against the latest version..."
+
+              # Reset only this temporary GitHub runner
+              git reset --hard origin/main
+
+              # Regenerate database using latest repository
+              python refresh_jobs.py
+
+            fi
+
+            # Stage updated database
+            git add data/jobs.db
+
+            # Exit successfully if nothing changed
+            if git diff --cached --quiet; then
+              echo "Database is already up to date."
+              exit 0
+            fi
+
+            # Commit refreshed database
             git commit -m "Automated daily job refresh"
-            git push
-          else
-            echo "No database changes to commit."
-          fi
+
+            # Try pushing changes
+            if git push origin HEAD:main; then
+              echo "Database pushed successfully!"
+              exit 0
+            fi
+
+            echo "Push rejected. Retrying..."
+
+          done
+
+          echo "Failed to push after 3 attempts."
+          exit 1
