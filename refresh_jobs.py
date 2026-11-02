@@ -1,74 +1,101 @@
 
-import sqlite3
-import requests
 from pathlib import Path
-from datetime import datetime, timezone
+from database import connect_database
+from job_collector import collect_jobs
 
-DB_PATH = Path("data/greenhouse.db")
-
-# Replace or expand with verified Greenhouse board tokens
-COMPANIES = [
-    "greenhouse",
+BOARD_TOKENS = [
+    "anthropic",
+    "discord",
+    "databricks",
+    "stripe",
+    "airbnb",
+    "figma",
+    "robinhood",
+    "figureai",
+    "sigmacomputing",
+    "hackerrank",
+    "instawork",
 ]
 
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-conn = sqlite3.connect(DB_PATH)
+def main():
+    Path("data").mkdir(exist_ok=True)
 
-conn.execute("""
-CREATE TABLE IF NOT EXISTS jobs (
-    company TEXT NOT NULL,
-    job_id TEXT NOT NULL,
-    title TEXT,
-    location TEXT,
-    url TEXT,
-    description TEXT,
-    last_seen TEXT,
-    PRIMARY KEY (company, job_id)
-)
-""")
+    connection = connect_database()
 
-now = datetime.now(timezone.utc).isoformat()
+    total_collected = 0
+    total_updated = 0
+    successful_boards = 0
 
-for company in COMPANIES:
     try:
-        response = requests.get(
-            f"https://boards-api.greenhouse.io/v1/boards/{company}/jobs",
-            params={"content": "true"},
-            timeout=30
-        )
-        response.raise_for_status()
+        for board in BOARD_TOKENS:
+            print(f"\nRefreshing {board}...")
 
-        jobs = response.json().get("jobs", [])
+            try:
+                jobs = collect_jobs(board)
+            except Exception as error:
+                print(f"Collection failed for {board}: {error}")
+                continue
 
-        for job in jobs:
-            conn.execute("""
-                INSERT INTO jobs
-                (company, job_id, title, location,
-                 url, description, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(company, job_id)
-                DO UPDATE SET
-                    title = excluded.title,
-                    location = excluded.location,
-                    url = excluded.url,
-                    description = excluded.description,
-                    last_seen = excluded.last_seen
-            """, (
-                company,
-                str(job["id"]),
-                job.get("title"),
-                job.get("location", {}).get("name"),
-                job.get("absolute_url"),
-                job.get("content"),
-                now
-            ))
+            successful_boards += 1
+            total_collected += len(jobs)
 
-        conn.commit()
-        print(f"{company}: {len(jobs)} jobs collected")
+            for job in jobs:
+                if not job.get("id"):
+                    continue
 
-    except (requests.RequestException, ValueError, KeyError) as error:
-        print(f"Failed to refresh {company}: {error}")
+                # Keep IDs consistent with the existing database
+                source_id = str(
+                    job.get("source_id") or job["id"]
+                )
 
-conn.close()
-print("Database refresh complete")
+                connection.execute(
+                    """
+                    INSERT INTO jobs (
+                        source_id,
+                        company,
+                        title,
+                        location,
+                        description,
+                        url
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_id)
+                    DO UPDATE SET
+                        company = excluded.company,
+                        title = excluded.title,
+                        location = excluded.location,
+                        description = excluded.description,
+                        url = excluded.url
+                    """,
+                    (
+                        source_id,
+                        job.get("company") or board,
+                        job.get("title") or "",
+                        job.get("location") or "",
+                        job.get("description") or "",
+                        job.get("url") or "",
+                    ),
+                )
+
+                total_updated += 1
+
+            connection.commit()
+            print(f"Processed {len(jobs)} jobs from {board}")
+
+        if successful_boards == 0:
+            raise RuntimeError(
+                "All Greenhouse board requests failed."
+            )
+
+        print("\nDATABASE REFRESH COMPLETE")
+        print(f"Jobs collected: {total_collected}")
+        print(f"Jobs inserted or updated: {total_updated}")
+        print(f"Boards reached: {successful_boards}")
+
+    finally:
+        connection.close()
+
+
+if __name__ == "__main__":
+    main()
