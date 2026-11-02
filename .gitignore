@@ -13,7 +13,8 @@ __pycache__/
 private/
 
 # Database and exports
-data/
+data/*
+!data/jobs.db
 
 # Mac files
 .DS_Store
