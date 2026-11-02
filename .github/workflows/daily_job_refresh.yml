@@ -1,18 +1,17 @@
 
-name: Daily Job Database Refresh
+name: Daily Greenhouse Job Refresh - FIXED
 
 on:
   schedule:
     - cron: "15 6 * * *"
       timezone: "America/Los_Angeles"
-
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: daily-job-refresh
+  group: greenhouse-db-main
   cancel-in-progress: false
 
 jobs:
@@ -20,80 +19,101 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
-      # STEP 1 — Download repository
-      - name: Checkout repository
+      - name: Checkout the main branch
         uses: actions/checkout@v5
         with:
           ref: main
+          fetch-depth: 0
           persist-credentials: true
 
-      # STEP 2 — Set up Python
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
-      # STEP 3 — Install Python dependencies
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt
 
-      # STEP 4 — Refresh and save database
-      - name: Sync and save updated database
+      - name: Refresh and push database - FIXED VERSION
         shell: bash
         run: |
           set -euo pipefail
 
-          # Configure GitHub Actions identity
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Retry if someone pushes to main at the same time
-          for attempt in 1 2 3; do
+          for attempt in 1 2 3 4 5; do
+            echo "=== Attempt $attempt/5: fetching latest main ==="
 
-            echo "================================"
-            echo "Database refresh attempt $attempt"
-            echo "================================"
-
-            # Get latest changes from GitHub
             git fetch origin main
 
-            # Synchronize the temporary runner
+            # Safe inside the temporary Actions runner
             git reset --hard origin/main
 
-            # Collect new Greenhouse jobs
-            # Includes publication dates if supported
+            echo "=== Collecting Greenhouse jobs and posting dates ==="
             python refresh_jobs.py
 
-            # Stage the SQLite database
+            echo "=== Verifying data/jobs.db ==="
+            python - <<'PY'
+          import sqlite3
+          from pathlib import Path
+
+          path = Path("data/jobs.db")
+
+          if not path.is_file():
+              raise SystemExit(
+                  "ERROR: refresh_jobs.py did not create data/jobs.db"
+              )
+
+          with sqlite3.connect(path) as conn:
+              columns = {
+                  row[1]
+                  for row in conn.execute("PRAGMA table_info(jobs)")
+              }
+
+              if "first_published" not in columns:
+                  raise SystemExit(
+                      "ERROR: jobs.first_published is missing"
+                  )
+
+              total = conn.execute(
+                  "SELECT COUNT(*) FROM jobs"
+              ).fetchone()[0]
+
+              dated = conn.execute(
+                  "SELECT COUNT(*) FROM jobs "
+                  "WHERE first_published IS NOT NULL"
+              ).fetchone()[0]
+
+              print(f"Jobs in database: {total}")
+              print(f"Jobs with publication dates: {dated}")
+
+              if total == 0:
+                  raise SystemExit(
+                      "ERROR: database is empty; refusing to publish"
+                  )
+          PY
+
+            echo "=== Committing data/jobs.db ==="
             git add -f data/jobs.db
 
-            # Check whether database changed
             if git diff --cached --quiet; then
-              echo "No database changes detected."
-              echo "Database is already up to date."
+              echo "SUCCESS: No database changes to publish."
               exit 0
             fi
 
-            # Commit the database update
             git commit -m "Automated daily job refresh"
 
-            # Attempt to push
-            if git push origin HEAD:main; then
-              echo "================================"
-              echo "SUCCESS: Database pushed to GitHub!"
-              echo "================================"
+            echo "=== Pushing to main ==="
+            if git push origin HEAD:refs/heads/main; then
+              echo "SUCCESS: Updated database published to GitHub."
               exit 0
             fi
 
-            echo "Push rejected because main changed."
-            echo "Synchronizing and retrying..."
-
+            echo "Push failed. Retrying with latest main..."
             sleep 2
-
           done
 
-          echo "ERROR: Failed to push after 3 attempts."
+          echo "ERROR: Could not push database after 5 attempts."
+          echo "Check the push error above for permissions or branch protection."
           exit 1
