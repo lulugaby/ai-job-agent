@@ -20,30 +20,80 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+
+      # STEP 1 — Download repository
       - name: Checkout repository
         uses: actions/checkout@v5
+        with:
+          ref: main
+          persist-credentials: true
 
+      # STEP 2 — Set up Python
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
+      # STEP 3 — Install Python dependencies
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt
-
-      - name: Refresh job listings
-        run: python refresh_jobs.py
-
-      - name: Commit updated database
         run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      # STEP 4 — Refresh and save database
+      - name: Sync and save updated database
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Configure GitHub Actions identity
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add data/jobs.db
+          # Retry if someone pushes to main at the same time
+          for attempt in 1 2 3; do
 
-          if ! git diff --cached --quiet; then
+            echo "================================"
+            echo "Database refresh attempt $attempt"
+            echo "================================"
+
+            # Get latest changes from GitHub
+            git fetch origin main
+
+            # Synchronize the temporary runner
+            git reset --hard origin/main
+
+            # Collect new Greenhouse jobs
+            # Includes publication dates if supported
+            python refresh_jobs.py
+
+            # Stage the SQLite database
+            git add -f data/jobs.db
+
+            # Check whether database changed
+            if git diff --cached --quiet; then
+              echo "No database changes detected."
+              echo "Database is already up to date."
+              exit 0
+            fi
+
+            # Commit the database update
             git commit -m "Automated daily job refresh"
-            git push
-          else
-            echo "No database changes to commit."
-          fi
+
+            # Attempt to push
+            if git push origin HEAD:main; then
+              echo "================================"
+              echo "SUCCESS: Database pushed to GitHub!"
+              echo "================================"
+              exit 0
+            fi
+
+            echo "Push rejected because main changed."
+            echo "Synchronizing and retrying..."
+
+            sleep 2
+
+          done
+
+          echo "ERROR: Failed to push after 3 attempts."
+          exit 1
